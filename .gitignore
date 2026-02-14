@@ -1,0 +1,63 @@
+# Build directories
+out/
+build/
+x64/
+x86/
+Debug/
+Release/
+CMakeFiles/
+
+# CMake generated
+CMakeCache.txt
+cmake_install.cmake
+CMakeLists.txt.user
+compile_commands.json
+.cmake/
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.db
+*.db-shm
+*.db-wal
+*.opendb
+*.ipch
+*.aps
+*.ncb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# Binaries
+*.exe
+*.dll
+*.lib
+*.obj
+*.o
+*.a
+*.pdb
+*.ilk
+*.exp
+
+# ImGui generated
+imgui.ini
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# WebView2 user data (runtime cache)
+WAlow_WebView2Data/
+WAlow_Data/
+
+# NuGet
+packages/
