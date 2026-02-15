@@ -96,14 +96,14 @@ static std::wstring GetAppDataFolder()
     wchar_t* ad = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &ad)))
     {
-        std::wstring f = std::wstring(ad) + L"\\LMBrowser";
+        std::wstring f = std::wstring(ad) + L"\\Wallow";
         CoTaskMemFree(ad);
         CreateDirectoryW(f.c_str(), nullptr);
         return f;
     }
     wchar_t p[MAX_PATH];
     GetModuleFileNameW(nullptr, p, MAX_PATH);
-    auto f = std::filesystem::path(p).parent_path() / L"LMBrowser_Data";
+    auto f = std::filesystem::path(p).parent_path() / L"Wallow_Data";
     CreateDirectoryW(f.wstring().c_str(), nullptr);
     return f.wstring();
 }
@@ -129,6 +129,7 @@ void WAlowSettings::Load(const std::wstring& folder)
         if (line.rfind("ramLimitMB=", 0) == 0) ramLimitMB = (size_t)atoi(line.c_str() + 11);
         else if (line.rfind("diskCacheMB=", 0) == 0) diskCacheMB = (size_t)atoi(line.c_str() + 12);
         else if (line.rfind("showStatusBar=", 0) == 0) showStatusBar = atoi(line.c_str() + 14) != 0;
+        else if (line.rfind("highDPI=", 0) == 0) highDPI = atoi(line.c_str() + 8) != 0;
         else if (line.rfind("zoomFactor=", 0) == 0) zoomFactor = (float)atof(line.c_str() + 11);
         else if (line.rfind("runAtStartup=", 0) == 0) runAtStartup = atoi(line.c_str() + 13) != 0;
         else if (line.rfind("customTabCount=", 0) == 0) customTabCount = atoi(line.c_str() + 15);
@@ -189,6 +190,7 @@ void WAlowSettings::Save(const std::wstring& folder) const
     f << "diskCacheMB=" << diskCacheMB << "\n";
     f << "swapPath=" << swapPath << "\n";
     f << "showStatusBar=" << (showStatusBar ? 1 : 0) << "\n";
+    f << "highDPI=" << (highDPI ? 1 : 0) << "\n";
     f << "zoomFactor=" << zoomFactor << "\n";
     f << "runAtStartup=" << (runAtStartup ? 1 : 0) << "\n";
     f << "customTabCount=" << customTabCount << "\n";
@@ -231,10 +233,10 @@ void SetRunAtStartup(bool enable)
         {
             wchar_t path[MAX_PATH];
             GetModuleFileNameW(nullptr, path, MAX_PATH);
-            RegSetValueExW(key, L"LMBrowser", 0, REG_SZ, (BYTE*)path, (DWORD)((wcslen(path) + 1) * sizeof(wchar_t)));
+            RegSetValueExW(key, L"Wallow", 0, REG_SZ, (BYTE*)path, (DWORD)((wcslen(path) + 1) * sizeof(wchar_t)));
         }
         else
-            RegDeleteValueW(key, L"LMBrowser");
+            RegDeleteValueW(key, L"Wallow");
         RegCloseKey(key);
     }
 }
@@ -246,7 +248,7 @@ bool IsRunAtStartup()
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
         0, KEY_READ, &key) == ERROR_SUCCESS)
     {
-        result = RegQueryValueExW(key, L"LMBrowser", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+        result = RegQueryValueExW(key, L"Wallow", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
         RegCloseKey(key);
     }
     return result;
@@ -281,7 +283,7 @@ void CreateTrayIcon(AppState& app)
     app.nid.uCallbackMessage = WM_TRAYICON;
     app.nid.hIcon = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
     if (!app.nid.hIcon) app.nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wcscpy_s(app.nid.szTip, L"LMBrowser");
+    wcscpy_s(app.nid.szTip, L"Wallow");
     Shell_NotifyIconW(NIM_ADD, &app.nid);
     app.trayCreated = true;
 }
@@ -372,7 +374,7 @@ void PeriodicMemoryMaintenance(AppState& app)
 bool CreateDeviceD3D(HWND hWnd, AppState& app)
 {
     DXGI_SWAP_CHAIN_DESC sd = {};
-    sd.BufferCount = 2; sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferCount = 2; sd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     sd.BufferDesc.RefreshRate = { 60, 1 };
     sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -487,9 +489,11 @@ void InitWebView2Environment(AppState& app)
     std::wstring udf = app.settings.GetEffectiveSwapPath(app.appDataFolder);
     auto eo = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
     wchar_t args[512];
-    swprintf_s(args, 512, L"--enable-low-end-device-mode --disk-cache-size=%zu --disable-features=BackForwardCache",
+    swprintf_s(args, 512, L"--enable-low-end-device-mode --disk-cache-size=%zu --disable-features=BackForwardCache --disable-site-isolation-trials",
         app.settings.diskCacheMB * 1024ULL * 1024ULL);
     eo->put_AdditionalBrowserArguments(args);
+    eo->put_AllowSingleSignOnUsingOSPrimaryAccount(TRUE);
+    
     CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), eo.Get(),
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [&app](HRESULT r, ICoreWebView2Environment* env) -> HRESULT {
@@ -629,8 +633,47 @@ static void RenderSettingsPanel(AppState& app)
     for (int i = 0; i < app.GetTotalTabCount(); i++)
     {
         ImGui::PushID(i);
-        ImGui::SetNextItemWidth(180);
+        ImGui::SetNextItemWidth(140);
         ImGui::Combo(app.GetTabName(i), &app.settings.appPerfMode[i], PerfModeNames, PERF_MODE_COUNT);
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f, 0.3f, 0.3f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.1f, 0.1f, 1.0f));
+        if (ImGui::Button("Reset & Clear Data"))
+        {
+            if (app.tabs[i].webview) {
+                // Try to clear browsing data (cookies, storage, etc.)
+                ICoreWebView2_13* wv13 = nullptr;
+                if (SUCCEEDED(app.tabs[i].webview->QueryInterface(IID_PPV_ARGS(&wv13))) && wv13) {
+                    ICoreWebView2Profile* profile = nullptr;
+                    wv13->get_Profile(&profile);
+                    if (profile) {
+                        ICoreWebView2Profile2* profile2 = nullptr;
+                        if (SUCCEEDED(profile->QueryInterface(IID_PPV_ARGS(&profile2))) && profile2) {
+                            // Clear all browsing data (cookies, dom storage, etc.)
+                            profile2->ClearBrowsingDataInTimeRange(
+                                (COREWEBVIEW2_BROWSING_DATA_KINDS)(COREWEBVIEW2_BROWSING_DATA_KINDS_ALL_DOM_STORAGE | COREWEBVIEW2_BROWSING_DATA_KINDS_COOKIES),
+                                0, 3155378976000000000LL, nullptr); // ~100 years
+                            profile2->Release();
+                        }
+                        profile->Release();
+                    }
+                    wv13->Release();
+                }
+            }
+
+            if (app.tabs[i].controller) {
+                app.tabs[i].controller->Close();
+                app.tabs[i].controller->Release();
+                app.tabs[i].controller = nullptr;
+                app.tabs[i].webview = nullptr;
+            }
+            app.tabs[i].ready = false;
+            app.tabs[i].loading = false;
+            app.tabInitStarted[i] = false; // Allow re-init
+            if (i == app.activeTab) CreateTabWebView(app, i);
+        }
+        ImGui::PopStyleColor(3);
         ImGui::PopID();
     }
     ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f),
@@ -678,6 +721,9 @@ static void RenderSettingsPanel(AppState& app)
     // Display
     ImGui::TextColored(ImVec4(0.3f, 0.75f, 0.5f, 1.0f), "Display");
     ImGui::Spacing();
+
+    /*
+    // Removed Zoom option as per request
     ImGui::SetNextItemWidth(200);
     if (ImGui::SliderFloat("Page Zoom", &app.settings.zoomFactor, 0.25f, 3.0f, "%.0f%%"))
     {
@@ -687,9 +733,17 @@ static void RenderSettingsPanel(AppState& app)
     // Show percentage properly
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "(%.0f%%)", app.settings.zoomFactor * 100.0f);
+    */
 
     bool sb = app.settings.showStatusBar;
     if (ImGui::Checkbox("Show Status Bar", &sb)) app.settings.showStatusBar = sb;
+    
+    bool hdpi = app.settings.highDPI;
+    if (ImGui::Checkbox("High DPI Rendering (Crisp)", &hdpi)) app.settings.highDPI = hdpi;
+    if (hdpi != (IsProcessDPIAware() ? true : false)) // Note: Simplistic check, restart simplifies logic
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Restart required to apply DPI change.");
+    ImGui::TextColored(ImVec4(0.8f, 0.4f, 0.4f, 1.0f), "Note: Image colors may look off like the bit depth is low.");
+
     ImGui::Spacing(); ImGui::Spacing();
 
     // Storage
@@ -783,7 +837,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (lParam == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONUP) RestoreFromTray(g_app);
         else if (lParam == WM_RBUTTONUP) {
             HMENU m = CreatePopupMenu();
-            AppendMenuW(m, MF_STRING, 1, L"Show LMBrowser");
+            AppendMenuW(m, MF_STRING, 1, L"Show Wallow");
             AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(m, MF_STRING, 2, L"Quit");
             POINT pt; GetCursorPos(&pt); SetForegroundWindow(hWnd);
@@ -810,6 +864,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 
     g_app.appDataFolder = GetAppDataFolder();
     g_app.settings.Load(g_app.appDataFolder);
+    if (g_app.settings.highDPI) ImGui_ImplWin32_EnableDpiAwareness();
+
     g_app.settings.runAtStartup = IsRunAtStartup();
     ApplyWorkingSetLimit(g_app.settings.ramLimitMB);
     g_app.activeTab = g_app.FindFirstEnabledTab();
@@ -819,10 +875,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
     wc.hIcon = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
     wc.hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(101), IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"LMBrowser_Class";
+    wc.lpszClassName = L"Wallow_Class";
     RegisterClassExW(&wc);
 
-    g_app.hwnd = CreateWindowExW(0, wc.lpszClassName, L"LMBrowser", WS_OVERLAPPEDWINDOW,
+    g_app.hwnd = CreateWindowExW(0, wc.lpszClassName, L"Wallow", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, g_app.windowWidth, g_app.windowHeight, nullptr, nullptr, hInst, nullptr);
     BOOL dark = TRUE; DwmSetWindowAttribute(g_app.hwnd, 20, &dark, sizeof(dark));
 

@@ -53,6 +53,7 @@ struct WAlowSettings
     char        swapPath[512] = "";
     size_t      diskCacheMB = 100;
     bool        showStatusBar = true;
+    bool        highDPI = true;
     float       zoomFactor = 1.0f;
     bool        runAtStartup = false;
     int         appPerfMode[MAX_TABS] = {};

@@ -7,7 +7,7 @@ if (POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
-project ("LMBrowser")
+project ("Wallow")
 
 # =============================================================================
 # WebView2 SDK - Download via NuGet
@@ -45,6 +45,7 @@ else()
 endif()
 
 set(WEBVIEW2_INCLUDE "${WEBVIEW2_DIR}/build/native/include")
+message(STATUS "WebView2 Include Path: ${WEBVIEW2_INCLUDE}")
 set(WEBVIEW2_LIB_DIR "${WEBVIEW2_DIR}/build/native/${WEBVIEW2_ARCH}")
 
 # =============================================================================
@@ -64,26 +65,26 @@ set(IMGUI_SOURCES
 # =============================================================================
 # Application
 # =============================================================================
-add_executable(LMBrowser WIN32
+add_executable(Wallow WIN32
   "WAlow.cpp"
   "WAlow.h"
-  "LMBrowser.rc"
+  "Wallow.rc"
   ${IMGUI_SOURCES}
 )
 
-set_property(TARGET LMBrowser PROPERTY CXX_STANDARD 20)
+set_property(TARGET Wallow PROPERTY CXX_STANDARD 20)
 
-target_include_directories(LMBrowser PRIVATE
+target_include_directories(Wallow PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${IMGUI_DIR}"
   "${WEBVIEW2_INCLUDE}"
 )
 
-target_link_directories(LMBrowser PRIVATE
+target_link_directories(Wallow PRIVATE
   "${WEBVIEW2_LIB_DIR}"
 )
 
-target_link_libraries(LMBrowser PRIVATE
+target_link_libraries(Wallow PRIVATE
   d3d11
   dxgi
   psapi
@@ -92,4 +93,4 @@ target_link_libraries(LMBrowser PRIVATE
 )
 
 # Link Windows subsystem
-target_link_options(LMBrowser PRIVATE "/SUBSYSTEM:WINDOWS")
+target_link_options(Wallow PRIVATE "/SUBSYSTEM:WINDOWS")
