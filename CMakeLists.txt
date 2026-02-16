@@ -16,28 +16,16 @@ set(WEBVIEW2_VERSION "1.0.2903.40")
 set(WEBVIEW2_DIR "${CMAKE_BINARY_DIR}/packages/Microsoft.Web.WebView2.${WEBVIEW2_VERSION}")
 set(NUGET_EXE "${CMAKE_BINARY_DIR}/nuget.exe")
 
-# Download nuget.exe if not present
 if(NOT EXISTS "${NUGET_EXE}")
   message(STATUS "Downloading nuget.exe...")
-  file(DOWNLOAD
-    "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe"
-    "${NUGET_EXE}"
-    TLS_VERIFY ON
-  )
+  file(DOWNLOAD "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" "${NUGET_EXE}" TLS_VERIFY ON)
 endif()
 
-# Install WebView2 NuGet package
 if(NOT EXISTS "${WEBVIEW2_DIR}")
   message(STATUS "Installing Microsoft.Web.WebView2 NuGet package...")
-  execute_process(
-    COMMAND "${NUGET_EXE}" install Microsoft.Web.WebView2
-      -Version ${WEBVIEW2_VERSION}
-      -OutputDirectory "${CMAKE_BINARY_DIR}/packages"
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-  )
+  execute_process(COMMAND "${NUGET_EXE}" install Microsoft.Web.WebView2 -Version ${WEBVIEW2_VERSION} -OutputDirectory "${CMAKE_BINARY_DIR}/packages" WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
 endif()
 
-# Determine arch for WebView2 loader lib
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
   set(WEBVIEW2_ARCH "x64")
 else()
@@ -45,7 +33,6 @@ else()
 endif()
 
 set(WEBVIEW2_INCLUDE "${WEBVIEW2_DIR}/build/native/include")
-message(STATUS "WebView2 Include Path: ${WEBVIEW2_INCLUDE}")
 set(WEBVIEW2_LIB_DIR "${WEBVIEW2_DIR}/build/native/${WEBVIEW2_ARCH}")
 
 # =============================================================================
@@ -87,10 +74,15 @@ target_link_directories(Wallow PRIVATE
 target_link_libraries(Wallow PRIVATE
   d3d11
   dxgi
+  d3dcompiler
   psapi
   dwmapi
+  shlwapi
   WebView2LoaderStatic.lib
 )
 
-# Link Windows subsystem
 target_link_options(Wallow PRIVATE "/SUBSYSTEM:WINDOWS")
+
+target_compile_definitions(Wallow PRIVATE NOMINMAX)
+
+install(TARGETS Wallow RUNTIME DESTINATION bin)

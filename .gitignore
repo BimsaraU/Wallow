@@ -46,6 +46,7 @@ ipch/
 *.pdb
 *.ilk
 *.exp
+*.zip
 
 # ImGui generated
 imgui.ini

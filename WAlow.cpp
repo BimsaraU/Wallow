@@ -22,10 +22,12 @@
 #include <wrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <string>
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <tlhelp32.h>
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -110,10 +112,15 @@ static std::wstring GetAppDataFolder()
 
 void WAlowSettings::InitDefaults()
 {
+    // Default to Ultralight as requested
+    browserEngine = 0;
     for (int i = 0; i < BUILTIN_COUNT; i++)
         appPerfMode[i] = g_builtinApps[i].defaultPerf;
     for (int i = BUILTIN_COUNT; i < MAX_TABS; i++)
-        appPerfMode[i] = PERF_INACTIVE;
+    appPerfMode[i] = PERF_INACTIVE;
+    disableGPU = false;
+    optimizeFull = false;
+    showRamUsage = true;
 }
 
 void WAlowSettings::Load(const std::wstring& folder)
@@ -129,14 +136,17 @@ void WAlowSettings::Load(const std::wstring& folder)
         if (line.rfind("ramLimitMB=", 0) == 0) ramLimitMB = (size_t)atoi(line.c_str() + 11);
         else if (line.rfind("diskCacheMB=", 0) == 0) diskCacheMB = (size_t)atoi(line.c_str() + 12);
         else if (line.rfind("showStatusBar=", 0) == 0) showStatusBar = atoi(line.c_str() + 14) != 0;
-        else if (line.rfind("highDPI=", 0) == 0) highDPI = atoi(line.c_str() + 8) != 0;
+        else if (line.rfind("showRamUsage=", 0) == 0) showRamUsage = atoi(line.c_str() + 13) != 0;
+        else if (line.rfind("browserEngine=", 0) == 0) browserEngine = atoi(line.c_str() + 14);
+        else if (line.rfind("disableGPU=", 0) == 0) disableGPU = atoi(line.c_str() + 11) != 0;
+        else if (line.rfind("optimizeFull=", 0) == 0) optimizeFull = atoi(line.c_str() + 13) != 0;
         else if (line.rfind("zoomFactor=", 0) == 0) zoomFactor = (float)atof(line.c_str() + 11);
         else if (line.rfind("runAtStartup=", 0) == 0) runAtStartup = atoi(line.c_str() + 13) != 0;
         else if (line.rfind("customTabCount=", 0) == 0) customTabCount = atoi(line.c_str() + 15);
         else if (line.rfind("swapPath=", 0) == 0)
         {
             std::string v = line.substr(9);
-            strncpy(swapPath, v.c_str(), sizeof(swapPath) - 1);
+            strncpy_s(swapPath, v.c_str(), _TRUNCATE);
         }
         else if (line.rfind("perf_", 0) == 0)
         {
@@ -155,7 +165,7 @@ void WAlowSettings::Load(const std::wstring& folder)
             {
                 int idx = atoi(line.c_str() + 7);
                 if (idx >= 0 && idx < MAX_CUSTOM_TABS)
-                    strncpy(customTabs[idx].name, line.c_str() + eq + 1, sizeof(customTabs[0].name) - 1);
+                    strncpy_s(customTabs[idx].name, line.c_str() + eq + 1, _TRUNCATE);
             }
         }
         else if (line.rfind("ctUrl_", 0) == 0)
@@ -165,7 +175,7 @@ void WAlowSettings::Load(const std::wstring& folder)
             {
                 int idx = atoi(line.c_str() + 6);
                 if (idx >= 0 && idx < MAX_CUSTOM_TABS)
-                    strncpy(customTabs[idx].url, line.c_str() + eq + 1, sizeof(customTabs[0].url) - 1);
+                    strncpy_s(customTabs[idx].url, line.c_str() + eq + 1, _TRUNCATE);
             }
         }
     }
@@ -190,7 +200,10 @@ void WAlowSettings::Save(const std::wstring& folder) const
     f << "diskCacheMB=" << diskCacheMB << "\n";
     f << "swapPath=" << swapPath << "\n";
     f << "showStatusBar=" << (showStatusBar ? 1 : 0) << "\n";
-    f << "highDPI=" << (highDPI ? 1 : 0) << "\n";
+    f << "showRamUsage=" << (showRamUsage ? 1 : 0) << "\n";
+    f << "browserEngine=" << browserEngine << "\n";
+    f << "disableGPU=" << (disableGPU ? 1 : 0) << "\n";
+    f << "optimizeFull=" << (optimizeFull ? 1 : 0) << "\n";
     f << "zoomFactor=" << zoomFactor << "\n";
     f << "runAtStartup=" << (runAtStartup ? 1 : 0) << "\n";
     f << "customTabCount=" << customTabCount << "\n";
@@ -295,17 +308,30 @@ void RemoveTrayIcon(AppState& app)
 
 void MinimizeToTray(AppState& app)
 {
+    app.isMinimized = true;
     ShowWindow(app.hwnd, SW_HIDE);
     for (int i = 0; i < app.GetTotalTabCount(); i++)
+    {
         if (app.tabs[i].controller) app.tabs[i].controller->put_IsVisible(FALSE);
+        ApplyTabMemoryPolicy(app, i, i == app.activeTab);
+    }
+    // Aggressive trim immediately
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 }
 
 void RestoreFromTray(AppState& app)
 {
+    app.isMinimized = false;
     ShowWindow(app.hwnd, SW_SHOW);
     SetForegroundWindow(app.hwnd);
     if (app.tabs[app.activeTab].controller)
         app.tabs[app.activeTab].controller->put_IsVisible(TRUE);
+
+    for (int i = 0; i < app.GetTotalTabCount(); i++)
+        ApplyTabMemoryPolicy(app, i, i == app.activeTab);
+    
+    // Force working set trim for inactive tabs after restoring
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 }
 
 // ============================================================================
@@ -325,37 +351,129 @@ void ApplyTabMemoryPolicy(AppState& app, int idx, bool isActive)
 {
     auto& t = app.tabs[idx];
     if (!t.webview) return;
+    
+    bool effectivelyActive = isActive && !app.isMinimized;
+
+    ICoreWebView2_3* w3 = nullptr;
+    if (SUCCEEDED(t.webview->QueryInterface(IID_PPV_ARGS(&w3))) && w3) 
+    {
+        if (app.isMinimized)
+        {
+            w3->TrySuspend(nullptr);
+        }
+        else if (!isActive)
+        {
+            // AGGRESSIVE: Always suspend inactive tabs to free memory
+            w3->TrySuspend(nullptr);
+        }
+        else if (isActive)
+        {
+            w3->Resume();
+        }
+        w3->Release();
+    }
+
     ICoreWebView2_19* w19 = nullptr;
     if (SUCCEEDED(t.webview->QueryInterface(IID_PPV_ARGS(&w19))) && w19)
     {
-        w19->put_MemoryUsageTargetLevel(isActive ?
+        w19->put_MemoryUsageTargetLevel(effectivelyActive ?
             COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL :
             COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW);
         w19->Release();
     }
-    if (!isActive && app.settings.appPerfMode[idx] == PERF_SUSPENDED)
+
+    // AGGRESSIVE: For inactive tabs, additionally trim the process working set
+    if (!effectivelyActive)
     {
-        ICoreWebView2_3* w3 = nullptr;
-        if (SUCCEEDED(t.webview->QueryInterface(IID_PPV_ARGS(&w3))) && w3) { w3->TrySuspend(nullptr); w3->Release(); }
-    }
-    else if (isActive)
-    {
-        ICoreWebView2_3* w3 = nullptr;
-        if (SUCCEEDED(t.webview->QueryInterface(IID_PPV_ARGS(&w3))) && w3) { w3->Resume(); w3->Release(); }
+        // Force immediate working set trim for this tab's renderer process
+        SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+        
+        // Try to get the browser process ID and trim it too
+        ICoreWebView2_12* w12 = nullptr;
+        if (SUCCEEDED(t.webview->QueryInterface(IID_PPV_ARGS(&w12))) && w12)
+        {
+            UINT32 pid = 0;
+            w12->get_BrowserProcessId(&pid);
+            if (pid != 0)
+            {
+                HANDLE hProc = OpenProcess(PROCESS_SET_QUOTA, FALSE, pid);
+                if (hProc)
+                {
+                    SetProcessWorkingSetSize(hProc, (SIZE_T)-1, (SIZE_T)-1);
+                    CloseHandle(hProc);
+                }
+            }
+            w12->Release();
+        }
     }
 }
 
 void PeriodicMemoryMaintenance(AppState& app)
 {
     DWORD now = GetTickCount();
-    if (now - app.lastTrimTime < 15000) return;
+    if (now - app.lastTrimTime < 2000) return; // check every 2s for UI
+    bool heavyCheck = (now - app.lastTrimTime > 15000);
+    
+    // Memory stats
+    if (app.settings.showStatusBar && app.settings.showRamUsage) {
+        PROCESS_MEMORY_COUNTERS_EX pmc = {}; pmc.cb = sizeof(pmc);
+        size_t totalMem = 0;
+        if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+            totalMem += pmc.WorkingSetSize;
+
+        // Sum child processes (WebView2)
+        // We only do this if it's been a while or we want more responsiveness? 
+        // Traversing process list can be slightly heavy, let's do it every 2s is fine.
+        HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnap != INVALID_HANDLE_VALUE) {
+            std::vector<std::pair<DWORD, DWORD>> procs; // pid, ppid
+            PROCESSENTRY32W pe = {}; pe.dwSize = sizeof(pe);
+            if (Process32FirstW(hSnap, &pe)) {
+                do { procs.push_back({ pe.th32ProcessID, pe.th32ParentProcessID }); } while (Process32NextW(hSnap, &pe));
+            }
+            CloseHandle(hSnap);
+
+            DWORD myPid = GetCurrentProcessId();
+            std::vector<DWORD> pidsToCheck;
+            pidsToCheck.push_back(myPid);
+            
+            size_t idx = 0;
+            while(idx < pidsToCheck.size()) {
+                DWORD curr = pidsToCheck[idx++];
+                for (auto& p : procs) {
+                    if (p.second == curr) {
+                        // Avoid adding duplicates or self if circle (unlikely)
+                        bool found = false;
+                        for(auto existing : pidsToCheck) if(existing == p.first) found=true;
+                        if(!found) {
+                            pidsToCheck.push_back(p.first);
+                            // Get memory
+                            HANDLE hChild = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, p.first);
+                            if (hChild) {
+                                PROCESS_MEMORY_COUNTERS_EX pmc2 = {}; pmc2.cb = sizeof(pmc2);
+                                if (GetProcessMemoryInfo(hChild, (PROCESS_MEMORY_COUNTERS*)&pmc2, sizeof(pmc2))) {
+                                    totalMem += pmc2.WorkingSetSize;
+                                }
+                                CloseHandle(hChild);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        app.memoryUsageMB = totalMem / (1024 * 1024);
+    }
+
+    if (!heavyCheck) return;
     app.lastTrimTime = now;
     ApplyWorkingSetLimit(app.settings.ramLimitMB);
-    PROCESS_MEMORY_COUNTERS_EX pmc = {}; pmc.cb = sizeof(pmc);
-    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
-        app.memoryUsageMB = pmc.WorkingSetSize / (1024 * 1024);
+    
     for (int i = 0; i < app.GetTotalTabCount(); i++)
         if (app.IsTabEnabled(i)) ApplyTabMemoryPolicy(app, i, i == app.activeTab);
+    
+    // AGGRESSIVE: Always trim working set during maintenance
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+    
     std::wstring sf = app.settings.GetEffectiveSwapPath(app.appDataFolder);
     ULONGLONG tb = 0; WIN32_FIND_DATAW fd;
     HANDLE hF = FindFirstFileW((sf + L"\\*").c_str(), &fd);
@@ -422,9 +540,13 @@ static void SetupTabWebView(AppState& app, int idx, ICoreWebView2Controller* ctr
         s->put_IsWebMessageEnabled(TRUE); s->put_AreDevToolsEnabled(FALSE);
         s->put_IsStatusBarEnabled(FALSE); s->put_AreDefaultContextMenusEnabled(TRUE); }
 
+    const wchar_t* ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    // If user chose 'WebKit' (1) we can spoof as pure WebKit/Safari to sites that care, though engine is still Chromium.
+    if (app.settings.browserEngine == 1) ua = L"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
     ICoreWebView2Settings2* s2 = nullptr;
     if (SUCCEEDED(s->QueryInterface(IID_PPV_ARGS(&s2))) && s2) {
-        s2->put_UserAgent(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        s2->put_UserAgent(ua);
         s2->Release();
     }
 
@@ -474,6 +596,7 @@ void CreateTabWebView(AppState& app, int idx)
     if (app.tabInitStarted[idx]) return;
     if (!app.IsTabEnabled(idx)) return;
     app.tabInitStarted[idx] = true;
+
     if (!app.webviewEnvironment) return;
     int i = idx;
     app.webviewEnvironment->CreateCoreWebView2Controller(app.hwnd,
@@ -488,9 +611,17 @@ void InitWebView2Environment(AppState& app)
 {
     std::wstring udf = app.settings.GetEffectiveSwapPath(app.appDataFolder);
     auto eo = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
-    wchar_t args[512];
-    swprintf_s(args, 512, L"--enable-low-end-device-mode --disk-cache-size=%zu --disable-features=BackForwardCache --disable-site-isolation-trials",
-        app.settings.diskCacheMB * 1024ULL * 1024ULL);
+    
+    // We remove the extreme aggressive process limiting flags because they can cause session instability/login loss.
+    // Kept standard cache size and low-end mode.
+    wchar_t args[1024];
+    std::wstring extraArgs = L"--enable-low-end-device-mode --disable-features=BackForwardCache";
+    if (app.settings.disableGPU) extraArgs += L" --disable-gpu --disable-gpu-compositing";
+    if (app.settings.optimizeFull) extraArgs += L" --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --process-per-site"; // Aggressive memory saving/tab consolidation
+    
+    swprintf_s(args, 1024, L"%s --disk-cache-size=%llu",
+        extraArgs.c_str(), (unsigned long long)app.settings.diskCacheMB * 1024ULL * 1024ULL);
+    
     eo->put_AdditionalBrowserArguments(args);
     eo->put_AllowSingleSignOnUsingOSPrimaryAccount(TRUE);
     
@@ -516,11 +647,15 @@ void SwitchTab(AppState& app, int newTab)
     }
     app.activeTab = newTab;
     if (!app.tabInitStarted[newTab]) CreateTabWebView(app, newTab);
+
     if (app.tabs[newTab].controller) {
         app.tabs[newTab].controller->put_IsVisible(TRUE);
         ApplyTabMemoryPolicy(app, newTab, true);
         ResizeWebView(app);
     }
+    
+    // AGGRESSIVE: Immediately trim working set after tab switch to free inactive tab memory
+    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
 }
 
 void ResizeWebView(AppState& app)
@@ -537,6 +672,16 @@ void ResizeWebView(AppState& app)
 // ============================================================================
 // ImGui UI
 // ============================================================================
+
+static void RestartApp(AppState& app)
+{
+    app.settings.Save(app.appDataFolder);
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    ShellExecuteW(nullptr, L"open", path, nullptr, nullptr, SW_SHOWNORMAL);
+    app.wantQuit = true;
+    PostQuitMessage(0);
+}
 
 static void RenderToolbar(AppState& app)
 {
@@ -609,6 +754,9 @@ static void RenderSettingsPanel(AppState& app)
 
     // Memory
     ImGui::TextColored(ImVec4(0.3f, 0.75f, 0.5f, 1.0f), "Memory");
+    ImGui::Spacing();
+    bool sru = app.settings.showRamUsage;
+    if (ImGui::Checkbox("Show RAM Usage in Status Bar", &sru)) app.settings.showRamUsage = sru;
     ImGui::Spacing();
     int rl = (int)app.settings.ramLimitMB;
     ImGui::SetNextItemWidth(150);
@@ -709,8 +857,8 @@ static void RenderSettingsPanel(AppState& app)
         if (ImGui::Button("+ Add Custom Tab"))
         {
             int ci = app.settings.customTabCount;
-            strncpy(app.settings.customTabs[ci].name, "New", sizeof(app.settings.customTabs[0].name));
-            strncpy(app.settings.customTabs[ci].url, "https://", sizeof(app.settings.customTabs[0].url));
+            strncpy_s(app.settings.customTabs[ci].name, "New", _TRUNCATE);
+            strncpy_s(app.settings.customTabs[ci].url, "https://", _TRUNCATE);
             app.settings.appPerfMode[BUILTIN_COUNT + ci] = PERF_INACTIVE;
             app.settings.customTabCount++;
         }
@@ -718,31 +866,29 @@ static void RenderSettingsPanel(AppState& app)
     ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "New/changed custom tabs need app restart. Set perf mode above.");
     ImGui::Spacing(); ImGui::Spacing();
 
-    // Display
-    ImGui::TextColored(ImVec4(0.3f, 0.75f, 0.5f, 1.0f), "Display");
+
+    static const char* engineNames[] = { "Default (WebView2/Chromium)", "WebKit Simulation (UA Spoof)" };
+    ImGui::TextColored(ImVec4(0.3f, 0.75f, 0.5f, 1.0f), "Browser Engine");
     ImGui::Spacing();
-
-    /*
-    // Removed Zoom option as per request
-    ImGui::SetNextItemWidth(200);
-    if (ImGui::SliderFloat("Page Zoom", &app.settings.zoomFactor, 0.25f, 3.0f, "%.0f%%"))
+    ImGui::SetNextItemWidth(250);
+    if (ImGui::Combo("Engine", &app.settings.browserEngine, engineNames, 2))
     {
-        for (int i = 0; i < app.GetTotalTabCount(); i++)
-            ApplyZoomToTab(app, i);
+        // Require restart message
     }
-    // Show percentage properly
-    ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "(%.0f%%)", app.settings.zoomFactor * 100.0f);
-    */
+    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "Changing engine requires app restart. 'WebKit' simulates a Mac UserAgent.");
 
-    bool sb = app.settings.showStatusBar;
-    if (ImGui::Checkbox("Show Status Bar", &sb)) app.settings.showStatusBar = sb;
+    ImGui::Spacing(); ImGui::Spacing();
+
+    // Optimization Settings
+    ImGui::TextColored(ImVec4(0.3f, 0.75f, 0.5f, 1.0f), "Optimization");
+    ImGui::Spacing();
+    bool dgpu = app.settings.disableGPU;
+    if (ImGui::Checkbox("Disable GPU Acceleration (WebView2)", &dgpu)) app.settings.disableGPU = dgpu;
     
-    bool hdpi = app.settings.highDPI;
-    if (ImGui::Checkbox("High DPI Rendering (Crisp)", &hdpi)) app.settings.highDPI = hdpi;
-    if (hdpi != (IsProcessDPIAware() ? true : false)) // Note: Simplistic check, restart simplifies logic
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Restart required to apply DPI change.");
-    ImGui::TextColored(ImVec4(0.8f, 0.4f, 0.4f, 1.0f), "Note: Image colors may look off like the bit depth is low.");
+    bool optFull = app.settings.optimizeFull;
+    if (ImGui::Checkbox("Aggressive Optimization (Process per site, no throttling)", &optFull)) app.settings.optimizeFull = optFull;
+    
+    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "Requires restart to apply.");
 
     ImGui::Spacing(); ImGui::Spacing();
 
@@ -808,9 +954,12 @@ static void RenderStatusBar(AppState& app)
     if (t.loading) ImGui::TextColored(ImVec4(0.3f, 0.75f, 0.5f, 1.0f), "%s - Loading...", app.GetTabName(app.activeTab));
     else if (!t.title.empty()) ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "%s", t.title.c_str());
     else ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "%s", app.GetTabName(app.activeTab));
-    ImGui::SameLine(io.DisplaySize.x - 220.0f);
-    ImGui::TextColored(ImVec4(0.35f, 0.35f, 0.35f, 1.0f), "RAM: %zuMB / %zuMB  Disk: %zuMB",
-        app.memoryUsageMB, app.settings.ramLimitMB, app.swapFileSizeMB);
+    
+    if (app.settings.showRamUsage) {
+        ImGui::SameLine(io.DisplaySize.x - 220.0f);
+        ImGui::TextColored(ImVec4(0.35f, 0.35f, 0.35f, 1.0f), "RAM: %zuMB / %zuMB  Disk: %zuMB",
+            app.memoryUsageMB, app.settings.ramLimitMB, app.swapFileSizeMB);
+    }
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
@@ -858,13 +1007,42 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 {
+    // ============================================================================
+    // Single Instance Enforcement
+    // ============================================================================
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Global\\Wallow_SingleInstance_Mutex_B8E9F4A1");
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        // Another instance is running, find and restore it
+        HWND existingWindow = FindWindowW(L"Wallow_Class", nullptr);
+        if (existingWindow)
+        {
+            // If minimized to tray, restore it
+            if (!IsWindowVisible(existingWindow))
+            {
+                ShowWindow(existingWindow, SW_SHOW);
+                SetForegroundWindow(existingWindow);
+            }
+            else
+            {
+                // Just bring to front
+                SetForegroundWindow(existingWindow);
+                if (IsIconic(existingWindow))
+                    ShowWindow(existingWindow, SW_RESTORE);
+            }
+        }
+        if (hMutex) CloseHandle(hMutex);
+        return 0;
+    }
+    g_app.singleInstanceMutex = hMutex;
+
     SetLowPriority();
     ULONG hi = 2; HeapSetInformation(GetProcessHeap(), HeapCompatibilityInformation, &hi, sizeof(hi));
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     g_app.appDataFolder = GetAppDataFolder();
     g_app.settings.Load(g_app.appDataFolder);
-    if (g_app.settings.highDPI) ImGui_ImplWin32_EnableDpiAwareness();
+    ImGui_ImplWin32_EnableDpiAwareness(); // Always enable High DPI
 
     g_app.settings.runAtStartup = IsRunAtStartup();
     ApplyWorkingSetLimit(g_app.settings.ramLimitMB);
@@ -935,6 +1113,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 
         ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         RenderToolbar(g_app); RenderSettingsPanel(g_app); RenderStatusBar(g_app);
+
         ImGui::Render();
         const float cc[4] = { 0.039f, 0.039f, 0.039f, 1.0f };
         g_app.d3dDeviceContext->OMSetRenderTargets(1, &g_app.mainRenderTargetView, nullptr);
@@ -951,6 +1130,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int nShow)
 
     ImGui_ImplDX11_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
     CleanupDeviceD3D(g_app); DestroyWindow(g_app.hwnd);
-    UnregisterClassW(wc.lpszClassName, hInst); CoUninitialize();
+    UnregisterClassW(wc.lpszClassName, hInst);
+    
+    // Release single instance mutex
+    if (g_app.singleInstanceMutex)
+    {
+        ReleaseMutex(g_app.singleInstanceMutex);
+        CloseHandle(g_app.singleInstanceMutex);
+    }
+    
+    CoUninitialize();
     return 0;
 }

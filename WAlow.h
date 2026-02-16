@@ -4,6 +4,7 @@
 #include <vector>
 #include <d3d11.h>
 #include <shellapi.h>
+#include <memory>
 
 struct ICoreWebView2;
 struct ICoreWebView2Controller;
@@ -53,9 +54,12 @@ struct WAlowSettings
     char        swapPath[512] = "";
     size_t      diskCacheMB = 100;
     bool        showStatusBar = true;
-    bool        highDPI = true;
+    bool        showRamUsage = true; // New setting
+    int         browserEngine = 0; // 0=WebView2, 1=WebKit(Future)
     float       zoomFactor = 1.0f;
     bool        runAtStartup = false;
+    bool        disableGPU = false;      // New: disable GPU for WebView2
+    bool        optimizeFull = false;    // New: aggressive optimizations
     int         appPerfMode[MAX_TABS] = {};
     CustomTab   customTabs[MAX_CUSTOM_TABS] = {};
     int         customTabCount = 0;
@@ -97,6 +101,8 @@ struct AppState
     NOTIFYICONDATAW             nid = {};
     bool                        trayCreated = false;
     bool                        wantQuit = false;
+    bool                        restartRequired = false;
+    bool                        isMinimized = false;
 
     WAlowSettings               settings;
     std::wstring                appDataFolder;
@@ -104,6 +110,8 @@ struct AppState
     DWORD                       lastTrimTime = 0;
     size_t                      memoryUsageMB = 0;
     size_t                      swapFileSizeMB = 0;
+
+    HANDLE                      singleInstanceMutex = nullptr;
 
     int     GetTotalTabCount() const;
     const char* GetTabName(int index) const;
