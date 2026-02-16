@@ -51,6 +51,4 @@
     - Monitor memory usage.
     - Configure startup behavior.
 
-## License
 
-MIT License
